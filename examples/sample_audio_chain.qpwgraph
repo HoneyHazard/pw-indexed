@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<!DOCTYPE patchbay>
+<patchbay name="Sample Audio Chain" version="0.6.1">
+ <items>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="easyeffects_sink" port="easyeffects_sink:monitor_FL"/>
+   <input node="ee_soe_expander" port="ee_soe_expander:input_FL"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="easyeffects_sink" port="easyeffects_sink:monitor_FR"/>
+   <input node="ee_soe_expander" port="ee_soe_expander:input_FR"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_expander" port="ee_soe_expander:output_FL"/>
+   <input node="ee_soe_multiband_gate" port="ee_soe_multiband_gate:input_FL"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_expander" port="ee_soe_expander:output_FR"/>
+   <input node="ee_soe_multiband_gate" port="ee_soe_multiband_gate:input_FR"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_multiband_gate" port="ee_soe_multiband_gate:output_FL"/>
+   <input node="ee_soe_limiter" port="ee_soe_limiter:input_FL"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_multiband_gate" port="ee_soe_multiband_gate:output_FR"/>
+   <input node="ee_soe_limiter" port="ee_soe_limiter:input_FR"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_limiter" port="ee_soe_limiter:output_FL"/>
+   <input node="jamesdsp_sink" port="jamesdsp_sink:playback_FL"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="ee_soe_limiter" port="ee_soe_limiter:output_FR"/>
+   <input node="jamesdsp_sink" port="jamesdsp_sink:playback_FR"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="jamesdsp_sink" port="jamesdsp_sink:monitor_FL"/>
+   <input node="alsa_output.pci-0000_28_00.3.analog-stereo" port="alsa_output.pci-0000_28_00.3.analog-stereo:playback_FL"/>
+  </item>
+  <item node-type="pipewire" port-type="pipewire-audio">
+   <output node="jamesdsp_sink" port="jamesdsp_sink:monitor_FR"/>
+   <input node="alsa_output.pci-0000_28_00.3.analog-stereo" port="alsa_output.pci-0000_28_00.3.analog-stereo:playback_FR"/>
+  </item>
+ </items>
+</patchbay>

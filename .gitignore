@@ -1,0 +1,57 @@
+# AI-related directories and files  
+.ai/
+.warp/
+.cursor/
+.vscode/
+.idea/
+
+# AI assistant files
+*.ai
+.ai.*
+ai_*
+*_ai.*
+cursor_*
+warp_*
+
+# LLM/AI conversation logs
+conversation_*
+chat_*
+llm_*
+*_conversation.*
+*_chat.*
+*_llm.*
+
+# AI-generated temporary files
+*.tmp.ai
+*.ai.tmp
+temp_ai_*
+ai_temp_*
+
+# Local configuration and testing
+.local/
+local_config*
+user_config*
+test_output/
+test_*.txt
+
+# Runtime files
+*.log
+*.pid
+*.sock
+temp/
+tmp/
+
+# Development backup files
+*.bak
+*.backup
+*~
+.#*
+#*#
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Project-specific
+debug_*
+*.debug
