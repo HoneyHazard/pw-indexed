@@ -8,13 +8,19 @@
 #
 # Key Features:
 # - Indexed node enumeration matching qpwgraph (node~0, node~1, node~2)
+# - Creation-order based enumeration using object.serial (matches qpwgraph exactly)
 # - qpwgraph service management (pause/resume for reliable operations)
 # - Pattern-based connection operations
 # - Canonical one-liner format for copy-paste
 # - Live patchbay synchronization
 #
+# ENUMERATION FIX (2024-01-11):
+# Fixed enumeration mismatch with qpwgraph by switching from node ID ordering
+# to creation order (object.serial) which matches how qpwgraph numbers nodes.
+# This ensures gate~2:probe_FL references work consistently between tools.
+#
 # Author: AI Agent System
-# Version: 1.0.0
+# Version: 1.1.0
 # License: MIT
 
 # Safe mode: pipefail and exit-on-error enabled, unset variable checking disabled for arrays
@@ -25,7 +31,7 @@ set -eo pipefail
 #########################################
 
 SCRIPT_NAME="pw_indexed.sh"
-VERSION="1.0.0"
+VERSION="1.3.0"
 CACHE_DIR="/tmp/pw_indexed"
 CACHE_TTL=5  # Cache valid for 5 seconds
 
@@ -66,13 +72,13 @@ USAGE:
     pw_indexed.sh <command> [options] [arguments]
 
 COMMANDS:
-    nodes [pattern]                 List nodes with indexed enumeration
-    ports [node] [--input|--output] List ports for node(s)
-    connect [pattern]               Show current connections
-    make "source~N:port->target~M:port"  Create connection
-    remove "pattern->pattern"       Remove connections
-    masked "pattern->pattern"        Remove connections with pattern masking
-    exclusive "source->target"      Make exclusive connection
+    nodes|n [pattern] [--id|--state|--audio|--ports|--detailed|--all]  List nodes with indexed enumeration
+    ports|p [node] [--input|--output] List ports for node(s)
+    connect|c|connections [pattern] Show current connections
+    make|m "source~N:port->target~M:port"  Create connection
+    remove|r|disconnect "pattern->pattern"  Remove connections
+    masked|mask "pattern->pattern"  Remove connections with pattern masking
+    exclusive|e "source->target"    Make exclusive connection
     
     pause qpwgraph                  Pause qpwgraph for operations
     resume qpwgraph                 Resume qpwgraph
@@ -88,10 +94,17 @@ OPTIONS:
     --dry-run                      Preview mode (no changes)
     --batch file                   Process commands from file
     --verbose                      Verbose output
-    --help                         Show this help
+    --help|-h                      Show this help
+    --version                      Show version information
 
 EXAMPLES:
     pw_indexed.sh nodes multiband
+    pw_indexed.sh nodes --id        # Show node IDs and serial numbers
+    pw_indexed.sh nodes --state     # Show node states
+    pw_indexed.sh nodes --audio     # Show audio properties (channels, format, rate)
+    pw_indexed.sh nodes --ports     # Show detailed port information
+    pw_indexed.sh nodes --detailed  # Show everything (id, state, audio, ports)
+    pw_indexed.sh nodes --all       # Same as --detailed
     pw_indexed.sh make "limiter:output_FL->gate~2:probe_FL"
     pw_indexed.sh pause qpwgraph
     pw_indexed.sh connect --oneline
@@ -100,9 +113,9 @@ CANONICAL FORMAT:
     source_node~N:port_name->target_node~M:port_name
     
     Where:
-    - node_name = first instance (lowest node ID)
-    - node_name~1 = second instance  
-    - node_name~2 = third instance, etc.
+    - node_name = first instance (oldest by creation time)
+    - node_name~1 = second instance (next created)  
+    - node_name~2 = third instance (most recently created), etc.
 
 EOF
 }
@@ -155,11 +168,12 @@ create_node_mapping() {
     
     log "Creating indexed node mapping..."
     
-    # Collect all node IDs for each node name, sorted in ascending order (qpwgraph style)
+    # Collect all node IDs for each node name, sorted by object.serial (qpwgraph style)
     while IFS= read -r line; do
         if [[ -n "$line" ]]; then
-            node_id=$(echo "$line" | cut -d':' -f1)
-            node_name=$(echo "$line" | cut -d':' -f2)
+            node_serial=$(echo "$line" | cut -d':' -f1)
+            node_id=$(echo "$line" | cut -d':' -f2)
+            node_name=$(echo "$line" | cut -d':' -f3)
             
             # Add to the list for this node name
             if [[ -z "${node_id_lists[$node_name]:-}" ]]; then
@@ -172,10 +186,11 @@ create_node_mapping() {
         .[] | 
         select(.type == "PipeWire:Interface:Node") | 
         select(.info.props."node.name" != null) | 
-        "\(.id):\(.info.props."node.name")"
+        select(.info.props."object.serial" != null) |
+        "\(.info.props."object.serial"):\(.id):\(.info.props."node.name")"
     ' 2>/dev/null | sort -t: -k1,1n)
     
-    # Assign indexed notation based on ascending node ID order (matches qpwgraph)
+    # Assign indexed notation based on creation order from object.serial (matches qpwgraph)
     if [[ ${#node_id_lists[@]} -gt 0 ]]; then
         for node_name in "${!node_id_lists[@]}"; do
             node_ids=(${node_id_lists[$node_name]})
@@ -187,15 +202,15 @@ create_node_mapping() {
                 node_instances[${node_ids[0]}]="$node_name"
                 log "  $node_name -> ID ${node_ids[0]} (single instance)"
             else
-                # Multiple instances - assign based on ascending order
+                # Multiple instances - assign based on creation order
                 index=0
                 for node_id in "${node_ids[@]}"; do
                     if [[ $index -eq 0 ]]; then
-                        # Lowest node ID gets no suffix (base instance)
+                        # First created instance gets no suffix (base instance)
                         node_instances[$node_id]="$node_name"
                         log "  $node_name -> ID $node_id (base instance)"
                     else
-                        # Higher node IDs get ~1, ~2, etc.
+                        # Later created instances get ~1, ~2, etc.
                         node_instances[$node_id]="$node_name~$index"
                         log "  $node_name~$index -> ID $node_id"
                     fi
@@ -218,18 +233,19 @@ resolve_node_id() {
         local base_name=$(echo "$tilde_notation" | cut -d'~' -f1)
         local instance_num=$(echo "$tilde_notation" | cut -d'~' -f2)
         
-        # Get all instances of this node name, sorted by ID in ascending order
+        # Get all instances of this node name, sorted by creation order (object.serial)
         local instances=()
         while IFS= read -r line; do
             if [[ -n "$line" ]]; then
-                local node_id=$(echo "$line" | cut -d':' -f1)
+                local node_id=$(echo "$line" | cut -d':' -f2)
                 instances+=("$node_id")
             fi
         done < <(get_pipewire_dump | jq -r --arg name "$base_name" '
             .[] |
             select(.type == "PipeWire:Interface:Node") |
             select(.info.props."node.name" == $name) |
-            "\(.id):\(.info.props."node.name")"
+            select(.info.props."object.serial" != null) |
+            "\(.info.props."object.serial"):\(.id):\(.info.props."node.name")"
         ' 2>/dev/null | sort -t: -k1,1n)
         
         # Return the node ID at the specified index
@@ -241,13 +257,14 @@ resolve_node_id() {
             return 1
         fi
     else
-        # No tilde notation - get the first instance (lowest node ID)
+        # No tilde notation - get the first instance (oldest by creation order)
         get_pipewire_dump | jq -r --arg name "$tilde_notation" '
             .[] |
             select(.type == "PipeWire:Interface:Node") |
             select(.info.props."node.name" == $name) |
-            .id
-        ' 2>/dev/null | sort -n | head -1
+            select(.info.props."object.serial" != null) |
+            "\(.info.props."object.serial"):\(.id)"
+        ' 2>/dev/null | sort -t: -k1,1n | head -1 | cut -d':' -f2
     fi
 }
 
@@ -348,10 +365,35 @@ pattern_match() {
 
 list_nodes() {
     local pattern="*"
+    local show_id=false
+    local show_state=false
+    local show_audio=false
+    local show_ports=false
+    local show_detailed=false
     
     # Parse command-specific options
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --id)
+                show_id=true
+                shift
+                ;;
+            --state)
+                show_state=true
+                shift
+                ;;
+            --audio)
+                show_audio=true
+                shift
+                ;;
+            --ports)
+                show_ports=true
+                shift
+                ;;
+            --detailed|--all)
+                show_detailed=true
+                shift
+                ;;
             -*)
                 error "Unknown option for nodes command: $1"
                 ;;
@@ -372,7 +414,65 @@ list_nodes() {
                 for node_id in "${!node_instances[@]}"; do
                     local indexed_name="${node_instances[$node_id]}"
                     if pattern_match "$indexed_name" "$pattern"; then
-                        echo "$indexed_name@$node_id"
+                        if [[ "$show_detailed" == true ]]; then
+                            # Get comprehensive information for this node
+                            local node_info
+                            node_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                "\(.info.props."object.serial" // "N/A"):\(.info.state // "unknown"):\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."media.class" // "N/A")"
+                            ' 2>/dev/null)
+                            
+                            # Get port information with channel counting
+                            local port_info
+                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
+                                group_by(.info.props."port.direction") |
+                                map({
+                                    direction: .[0].info.props."port.direction",
+                                    count: length
+                                }) |
+                                "in:\(map(select(.direction == "in") | .count)[0] // 0):out:\(map(select(.direction == "out") | .count)[0] // 0)"
+                            ' 2>/dev/null)
+                            
+                            local serial_number=$(echo "$node_info" | cut -d':' -f1)
+                            local node_state=$(echo "$node_info" | cut -d':' -f2)
+                            local format=$(echo "$node_info" | cut -d':' -f3)
+                            local rate=$(echo "$node_info" | cut -d':' -f4)
+                            local media_class=$(echo "$node_info" | cut -d':' -f5)
+                            local input_count=$(echo "$port_info" | cut -d':' -f2)
+                            local output_count=$(echo "$port_info" | cut -d':' -f4)
+                            
+                            echo "$indexed_name@$node_id@$serial_number@$node_state@$input_count/$output_count@$format@$rate@$media_class"
+                        elif [[ "$show_state" == true ]]; then
+                            # Get just state for this node
+                            local node_state
+                            node_state=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                .info.state // "unknown"
+                            ' 2>/dev/null)
+                            echo "$indexed_name@$node_id@$node_state"
+                        elif [[ "$show_audio" == true ]]; then
+                            # Get audio properties for this node
+                            local audio_info
+                            audio_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                "\(.info.props."audio.channels" // "N/A"):\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."audio.position" // "N/A"):\(.info.props."media.class" // "N/A")"
+                            ' 2>/dev/null)
+                            local channels=$(echo "$audio_info" | cut -d':' -f1)
+                            local format=$(echo "$audio_info" | cut -d':' -f2)
+                            local rate=$(echo "$audio_info" | cut -d':' -f3)
+                            local position=$(echo "$audio_info" | cut -d':' -f4)
+                            local media_class=$(echo "$audio_info" | cut -d':' -f5)
+                            echo "$indexed_name@$node_id@$channels@$format@$rate@$position@$media_class"
+                        else
+                            echo "$indexed_name@$node_id"
+                        fi
                     fi
                 done | sort
             fi
@@ -389,7 +489,40 @@ list_nodes() {
                         else
                             echo ","
                         fi
-                        echo "  {\"name\": \"$indexed_name\", \"node_id\": $node_id}"
+                        if [[ "$show_detailed" == true ]]; then
+                            # Get comprehensive information for this node
+                            local node_info
+                            node_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                "\(.info.props."object.serial" // "N/A"):\(.info.state // "unknown"):\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."media.class" // "N/A")"
+                            ' 2>/dev/null)
+                            
+                            # Get port information with channel counting
+                            local port_info
+                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
+                                group_by(.info.props."port.direction") |
+                                map({
+                                    direction: .[0].info.props."port.direction",
+                                    count: length
+                                }) |
+                                "in:\(map(select(.direction == "in") | .count)[0] // 0):out:\(map(select(.direction == "out") | .count)[0] // 0)"
+                            ' 2>/dev/null)
+                            
+                            local serial_number=$(echo "$node_info" | cut -d':' -f1)
+                            local node_state=$(echo "$node_info" | cut -d':' -f2)
+                            local format=$(echo "$node_info" | cut -d':' -f3)
+                            local rate=$(echo "$node_info" | cut -d':' -f4)
+                            local media_class=$(echo "$node_info" | cut -d':' -f5)
+                            local input_count=$(echo "$port_info" | cut -d':' -f2)
+                            local output_count=$(echo "$port_info" | cut -d':' -f4)
+                            
+                            echo "  {\"name\": \"$indexed_name\", \"node_id\": $node_id, \"serial_number\": \"$serial_number\", \"state\": \"$node_state\", \"channels\": \"$input_count/$output_count\", \"format\": \"$format\", \"rate\": \"$rate\", \"media_class\": \"$media_class\"}"
+                        else
+                            echo "  {\"name\": \"$indexed_name\", \"node_id\": $node_id}"
+                        fi
                     fi
                 done
             fi
@@ -398,15 +531,178 @@ list_nodes() {
         *)
             # Table format
             echo "=== Indexed Nodes ==="
-            printf "%-40s %s\n" "INDEXED NAME" "NODE ID"
-            printf "%-40s %s\n" "$(printf '%*s' 40 '' | tr ' ' '-')" "-------"
+            if [[ "$show_detailed" == true ]]; then
+                printf "%-30s %-8s %-8s %-8s %-10s %-10s %-12s %-10s %s\n" "INDEXED NAME" "NODE ID" "SERIAL" "STATE" "CHNLS IN/OUT" "FORMAT" "RATE" "MEDIA CLASS" "PORTS"
+                printf "%-30s %-8s %-8s %-8s %-10s %-10s %-12s %-10s %s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 8 '' | tr ' ' '-')" "$(printf '%*s' 8 '' | tr ' ' '-')" "$(printf '%*s' 8 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 12 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "-----"
+            elif [[ "$show_state" == true ]]; then
+                printf "%-40s %-10s %s\n" "INDEXED NAME" "NODE ID" "STATE"
+                printf "%-40s %-10s %s\n" "$(printf '%*s' 40 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "-----"
+            elif [[ "$show_audio" == true ]]; then
+                printf "%-30s %-8s %-10s %-12s %-10s %s\n" "INDEXED NAME" "NODE ID" "CHNLS IN/OUT" "FORMAT" "RATE" "MEDIA CLASS"
+                printf "%-30s %-8s %-10s %-12s %-10s %s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 8 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 12 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "-----------"
+            elif [[ "$show_ports" == true ]]; then
+                printf "%-30s %-8s %-10s %-20s %-20s %s\n" "INDEXED NAME" "NODE ID" "CHNLS IN/OUT" "INPUT PORTS" "OUTPUT PORTS" "MEDIA CLASS"
+                printf "%-30s %-8s %-10s %-20s %-20s %s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 8 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 20 '' | tr ' ' '-')" "$(printf '%*s' 20 '' | tr ' ' '-')" "-----------"
+            else
+                printf "%-40s %s\n" "INDEXED NAME" "NODE ID"
+                printf "%-40s %s\n" "$(printf '%*s' 40 '' | tr ' ' '-')" "-------"
+            fi
             
             if [[ ${#node_instances[@]} -gt 0 ]]; then
                 output_lines=()
                 for node_id in "${!node_instances[@]}"; do
                     indexed_name="${node_instances[$node_id]}"
                     if pattern_match "$indexed_name" "$pattern"; then
-                        output_lines+=("$(printf "%-40s %s\n" "$indexed_name" "$node_id")")
+                        if [[ "$show_detailed" == true ]]; then
+                            # Get comprehensive information for this node
+                            local node_info
+                            node_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                "\(.info.props."object.serial" // "N/A"):\(.info.state // "unknown"):\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."media.class" // "N/A")"
+                            ' 2>/dev/null)
+                            
+                            # Get port information with channel counting and port names
+                            local port_info
+                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
+                                group_by(.info.props."port.direction") |
+                                map({
+                                    direction: .[0].info.props."port.direction",
+                                    count: length,
+                                    ports: [.[].info.props."port.name"]
+                                }) |
+                                "in:\(map(select(.direction == "in") | .count)[0] // 0):\(map(select(.direction == "in") | .ports | join(","))[0] // ""):out:\(map(select(.direction == "out") | .count)[0] // 0):\(map(select(.direction == "out") | .ports | join(","))[0] // "")"
+                            ' 2>/dev/null)
+                            
+                            local serial_number=$(echo "$node_info" | cut -d':' -f1)
+                            local node_state=$(echo "$node_info" | cut -d':' -f2)
+                            local format=$(echo "$node_info" | cut -d':' -f3)
+                            local rate=$(echo "$node_info" | cut -d':' -f4)
+                            local media_class=$(echo "$node_info" | cut -d':' -f5)
+                            
+                            local input_count=$(echo "$port_info" | cut -d':' -f2)
+                            local input_ports=$(echo "$port_info" | cut -d':' -f3)
+                            local output_count=$(echo "$port_info" | cut -d':' -f5)
+                            local output_ports=$(echo "$port_info" | cut -d':' -f6)
+                            
+                            # Format channels as "IN/OUT"
+                            local channels_display
+                            if [[ "$input_count" == "0" && "$output_count" == "0" ]]; then
+                                channels_display="N/A"
+                            else
+                                channels_display="$input_count/$output_count"
+                            fi
+                            
+                            # Create ports summary (truncate if too long)
+                            local ports_summary=""
+                            if [[ -n "$input_ports" && -n "$output_ports" ]]; then
+                                ports_summary="in:${input_ports:0:8}... out:${output_ports:0:8}..."
+                            elif [[ -n "$input_ports" ]]; then
+                                ports_summary="in:${input_ports:0:15}..."
+                            elif [[ -n "$output_ports" ]]; then
+                                ports_summary="out:${output_ports:0:15}..."
+                            else
+                                ports_summary="N/A"
+                            fi
+                            
+                            output_lines+=("$(printf "%-30s %-8s %-8s %-8s %-10s %-10s %-12s %-10s %s\n" "$indexed_name" "$node_id" "$serial_number" "$node_state" "$channels_display" "$format" "$rate" "$media_class" "$ports_summary")")
+                        elif [[ "$show_state" == true ]]; then
+                            # Get just state for this node
+                            local node_state
+                            node_state=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                .info.state // "unknown"
+                            ' 2>/dev/null)
+                            output_lines+=("$(printf "%-40s %-10s %s\n" "$indexed_name" "$node_id" "$node_state")")
+                        elif [[ "$show_audio" == true ]]; then
+                            # Get audio properties for this node
+                            local audio_info
+                            audio_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                "\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."media.class" // "N/A")"
+                            ' 2>/dev/null)
+                            
+                            # Get port information for this node with channel counting
+                            local port_info
+                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
+                                group_by(.info.props."port.direction") |
+                                map({
+                                    direction: .[0].info.props."port.direction",
+                                    count: length
+                                }) |
+                                "in:\(map(select(.direction == "in") | .count)[0] // 0):out:\(map(select(.direction == "out") | .count)[0] // 0)"
+                            ' 2>/dev/null)
+                            
+                            local format=$(echo "$audio_info" | cut -d':' -f1)
+                            local rate=$(echo "$audio_info" | cut -d':' -f2)
+                            local media_class=$(echo "$audio_info" | cut -d':' -f3)
+                            local input_count=$(echo "$port_info" | cut -d':' -f2)
+                            local output_count=$(echo "$port_info" | cut -d':' -f4)
+                            
+                            # Format channels as "IN/OUT"
+                            local channels_display
+                            if [[ "$input_count" == "0" && "$output_count" == "0" ]]; then
+                                channels_display="N/A"
+                            else
+                                channels_display="$input_count/$output_count"
+                            fi
+                            
+                            output_lines+=("$(printf "%-30s %-8s %-10s %-12s %-10s %s\n" "$indexed_name" "$node_id" "$channels_display" "$format" "$rate" "$media_class")")
+                        elif [[ "$show_ports" == true ]]; then
+                            # Get port information for this node with channel counting and port names
+                            local port_info
+                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
+                                group_by(.info.props."port.direction") |
+                                map({
+                                    direction: .[0].info.props."port.direction",
+                                    count: length,
+                                    ports: [.[].info.props."port.name"]
+                                }) |
+                                "in:\(map(select(.direction == "in") | .count)[0] // 0):\(map(select(.direction == "in") | .ports | join(","))[0] // ""):out:\(map(select(.direction == "out") | .count)[0] // 0):\(map(select(.direction == "out") | .ports | join(","))[0] // "")"
+                            ' 2>/dev/null)
+                            
+                            # Get media class
+                            local media_class
+                            media_class=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
+                                .[] | 
+                                select(.type == "PipeWire:Interface:Node") | 
+                                select(.id == ($node_id | tonumber)) |
+                                .info.props."media.class" // "N/A"
+                            ' 2>/dev/null)
+                            
+                            local input_count=$(echo "$port_info" | cut -d':' -f2)
+                            local input_ports=$(echo "$port_info" | cut -d':' -f3)
+                            local output_count=$(echo "$port_info" | cut -d':' -f5)
+                            local output_ports=$(echo "$port_info" | cut -d':' -f6)
+                            
+                            # Format channels as "IN/OUT"
+                            local channels_display
+                            if [[ "$input_count" == "0" && "$output_count" == "0" ]]; then
+                                channels_display="N/A"
+                            else
+                                channels_display="$input_count/$output_count"
+                            fi
+                            
+                            # Truncate port lists if too long for display
+                            if [[ ${#input_ports} -gt 18 ]]; then
+                                input_ports="${input_ports:0:15}..."
+                            fi
+                            if [[ ${#output_ports} -gt 18 ]]; then
+                                output_ports="${output_ports:0:15}..."
+                            fi
+                            
+                            output_lines+=("$(printf "%-30s %-8s %-10s %-20s %-20s %s\n" "$indexed_name" "$node_id" "$channels_display" "${input_ports:-N/A}" "${output_ports:-N/A}" "$media_class")")
+                        else
+                            output_lines+=("$(printf "%-40s %s\n" "$indexed_name" "$node_id")")
+                        fi
                     fi
                 done
                 # Sort and output the lines
@@ -596,14 +892,21 @@ list_connections() {
                 "\(.info."output-node-id"):\(.info."output-port-id")->\(.info."input-node-id"):\(.info."input-port-id"):\(.id):\(.info.state)"
             ' 2>/dev/null | while IFS= read -r connection; do
                 if [[ -n "$connection" ]]; then
-                    # Parse connection
-                    local parts=($(echo "$connection" | tr ':' ' '))
-                    local output_node_id="${parts[0]}"
-                    local output_port_id="${parts[1]}"
-                    local input_node_id="${parts[3]}"
-                    local input_port_id="${parts[4]}"
-                    local link_id="${parts[5]}"
-                    local state="${parts[6]}"
+                    # Parse connection using same approach as table format
+                    local output_part input_part_with_extra
+                    output_part=$(echo "$connection" | cut -d'-' -f1)
+                    input_part_with_extra=$(echo "$connection" | cut -d'>' -f2)
+                    # Extract link_id and state from the end
+                    local link_id state input_part
+                    link_id=$(echo "$input_part_with_extra" | grep -o ':[^:]*:[^:]*$' | cut -d':' -f2)
+                    state=$(echo "$input_part_with_extra" | grep -o ':[^:]*$' | cut -c2-)
+                    input_part=$(echo "$input_part_with_extra" | sed 's/:[^:]*:[^:]*$//')  # Remove :link_id:state from end
+                    
+                    local output_node_id output_port_id input_node_id input_port_id
+                    output_node_id=$(echo "$output_part" | cut -d':' -f1)
+                    output_port_id=$(echo "$output_part" | cut -d':' -f2)
+                    input_node_id=$(echo "$input_part" | cut -d':' -f1)
+                    input_port_id=$(echo "$input_part" | cut -d':' -f2)
                     
                     # Get indexed names and port names
                     local output_indexed_name="${node_instances[$output_node_id]:-node_$output_node_id}"
@@ -644,8 +947,9 @@ list_connections() {
                     # Parse connection
                     local output_part input_part state
                     output_part=$(echo "$connection" | cut -d'-' -f1)
-                    input_part=$(echo "$connection" | cut -d'>' -f2 | cut -d':' -f1,2)
-                    state=$(echo "$connection" | cut -d':' -f5)
+                    input_part=$(echo "$connection" | cut -d'>' -f2)
+                    # Extract state from the full connection string (after the last colon in input_part)
+                    state=$(echo "$connection" | grep -o ':[^:]*$' | cut -c2-)
                     
                     local output_node_id output_port_id input_node_id input_port_id
                     output_node_id=$(echo "$output_part" | cut -d':' -f1)
@@ -675,35 +979,103 @@ list_connections() {
     esac
 }
 
-# Parse canonical connection format: source~N:port->target~M:port
-# Returns: source_node:source_port:target_node:target_port
+# Parse comprehensive connection format with all arrow types
+# Supports: ->, ←, →, |<-, |->, <-, <--, -->, <=, =>, \u003e, \u003c
+# Returns: source_node:source_port:target_node:target_port:direction
 parse_connection_format() {
     local connection_spec="$1"
+    local arrow_pattern=""
+    local direction="forward"  # forward|reverse
     
-    # Handle both -> and \u003e arrow formats
-    local arrow_pattern="->"
-    if [[ "$connection_spec" == *"\\u003e"* ]]; then
-        # Convert \u003e to >
-        connection_spec=$(echo "$connection_spec" | sed 's/\\u003e/>/g')
-        arrow_pattern="->"
+    # Normalize Unicode and HTML entities first
+    connection_spec=$(echo "$connection_spec" | sed -e 's/\\u003e/>/g' -e 's/\\u003c/</g' -e 's/\&gt;/>/g' -e 's/\&lt;/</g')
+    
+    # Detect arrow type and direction (order matters - check longer patterns first)
+    if [[ "$connection_spec" == *"<--"* ]]; then
+        arrow_pattern="<--"; direction="reverse"
+    elif [[ "$connection_spec" == *"-->"* ]]; then
+        arrow_pattern="-->"; direction="forward"
+    elif [[ "$connection_spec" == *"|<-"* ]]; then
+        arrow_pattern="|<-"; direction="reverse"
+    elif [[ "$connection_spec" == *"|->"* ]]; then
+        arrow_pattern="|->"; direction="forward"
+    elif [[ "$connection_spec" == *"<="* ]]; then
+        arrow_pattern="<="; direction="reverse"
+    elif [[ "$connection_spec" == *"=>"* ]]; then
+        arrow_pattern="=>"; direction="forward"
+    elif [[ "$connection_spec" == *"<-"* ]]; then
+        arrow_pattern="<-"; direction="reverse"
     elif [[ "$connection_spec" == *"->"* ]]; then
-        arrow_pattern="->"
-    elif [[ "$connection_spec" == *"->"* ]]; then
-        arrow_pattern="->"
+        arrow_pattern="->"; direction="forward"
+    elif [[ "$connection_spec" == *"←"* ]]; then
+        arrow_pattern="←"; direction="reverse"
+    elif [[ "$connection_spec" == *"→"* ]]; then
+        arrow_pattern="→"; direction="forward"
+    elif [[ "$connection_spec" == *"<"* ]]; then
+        arrow_pattern="<"; direction="reverse"
+    elif [[ "$connection_spec" == *">"* ]]; then
+        arrow_pattern=">"; direction="forward"
     else
-        error "Invalid connection format. Expected: source:port->target:port or source:port->target:port"
+        error "Invalid connection format. No recognized arrow found.\nSupported arrows: ->, <-, |<-, |->, ←, →, <--, -->, <=, =>, <, >"
     fi
     
-    # Split on arrow
+    # Split on arrow based on detected pattern
     local source_part target_part
-    if [[ "$arrow_pattern" == "->" ]]; then
-        source_part=$(echo "$connection_spec" | cut -d'-' -f1)
-        target_part=$(echo "$connection_spec" | cut -d'>' -f2)
-    else
-        # Handle -> pattern
-        source_part="${connection_spec%%->*}"
-        target_part="${connection_spec##*->}"
-    fi
+    case "$arrow_pattern" in
+        "->")
+            source_part="${connection_spec%%->*}"
+            target_part="${connection_spec##*->}"
+            ;;
+        "<-")
+            target_part="${connection_spec%%<-*}"
+            source_part="${connection_spec##*<-}"
+            ;;
+        "|->"|"→")
+            source_part="${connection_spec%%$arrow_pattern*}"
+            target_part="${connection_spec##*$arrow_pattern}"
+            ;;
+        "|<-"|"←")
+            target_part="${connection_spec%%$arrow_pattern*}"
+            source_part="${connection_spec##*$arrow_pattern}"
+            ;;
+        "-->")
+            source_part="${connection_spec%%-->*}"
+            target_part="${connection_spec##*-->}"
+            ;;
+        "<--")
+            target_part="${connection_spec%%<--*}"
+            source_part="${connection_spec##*<--}"
+            ;;
+        "=>")
+            source_part="${connection_spec%%=>*}"
+            target_part="${connection_spec##*=>}"
+            ;;
+        "<=")
+            target_part="${connection_spec%%<=*}"
+            source_part="${connection_spec##*<=}"
+            ;;
+        ">")
+            source_part="${connection_spec%%>*}"
+            target_part="${connection_spec##*>}"
+            ;;
+        "<")
+            target_part="${connection_spec%%<*}"
+            source_part="${connection_spec##*<}"
+            ;;
+        *)
+            # Fallback - try to split on whatever arrow we detected
+            if [[ "$direction" == "forward" ]]; then
+                source_part="${connection_spec%%$arrow_pattern*}"
+                target_part="${connection_spec##*$arrow_pattern}"
+            else
+                target_part="${connection_spec%%$arrow_pattern*}"
+                source_part="${connection_spec##*$arrow_pattern}"
+            fi
+            ;;
+    esac
+    
+    # Note: Direction reversal is already handled in the splitting logic above
+    # The case statements already put the correct parts in source_part and target_part
     
     # Extract node and port from source
     if [[ "$source_part" != *":"* ]]; then

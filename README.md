@@ -4,22 +4,21 @@
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-Linux-blue.svg)](https://www.kernel.org/)
 
-**Version:** 1.0.0  
-**License:** MIT
-
-A comprehensive PipeWire connection management tool with indexed node enumeration compatible with qpwgraph's naming system. Built to work around qpwgraph's interference with programmatic connection management while providing powerful automation capabilities for complex audio setups.
+A comprehensive PipeWire connection management tool with **indexed node enumeration** for reliable programmatic audio routing. Features serializable input/output for connections and deterministic node identification inspired by qpwgraph's naming conventions.
 
 ## 🎯 Purpose
 
-**Primary Problem Solved:** Managing complex PipeWire audio chains programmatically while maintaining compatibility with qpwgraph's visual workflow. Multiple instances of the same node need deterministic indexing, and qpwgraph actively interferes with programmatic changes when running.
+**Core Innovation:** **Indexed node enumeration** - When multiple instances of audio applications create nodes with identical names, PW_Indexed provides deterministic indexing (node, node~1, node~2) enabling reliable programmatic operations.
 
-**Solution:** Swiss Army Knife approach combining qpwgraph-compatible enumeration, intelligent service management, pattern-based operations, and full patchbay synchronization.
+**Key Distinction:** While inspired by qpwgraph's display naming, PW_Indexed uses **augmented node names** for unique operations rather than just visual labeling. This enables serializable connection specifications that can be reliably reproduced across audio system restarts.
+
+**Serializable I/O:** All connection operations support standardized, machine-readable formats for automation, backup, and restoration of complex audio routing configurations.
 
 ## 🚀 Key Features
 
 ### Core Functionality ✅
 - **🔢 Indexed Node Enumeration:** Full compatibility with qpwgraph naming (node, node~1, node~2)
-- **⏸️ Service Management:** Intelligent pause/resume of qpwgraph for reliable operations
+- **⏸️ Service Management:** Pause/resume of qpwgraph for conflict-free operations
 - **🔗 Connection Management:** Create, remove, and manage connections with pattern matching
 - **📋 Multiple Output Formats:** Table, one-liner, and JSON formatting
 - **⚡ Smart Caching:** 5-second cache with automatic invalidation
@@ -40,15 +39,15 @@ A comprehensive PipeWire connection management tool with indexed node enumeratio
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/pw_indexed.git ~/projs/pw_indexed
+git clone https://github.com/HoneyHazard/pw-indexed.git ~/projs/pw-indexed
 
 # Make executable and add to PATH
-chmod +x ~/projs/pw_indexed/pw_indexed.sh
+chmod +x ~/projs/pw-indexed/pw-indexed
 mkdir -p ~/.local/bin
-ln -sf ~/projs/pw_indexed/pw_indexed.sh ~/.local/bin/pw_indexed
+ln -sf ~/projs/pw-indexed/pw-indexed ~/.local/bin/pw-indexed
 
 # Verify installation
-pw_indexed --version
+pw-indexed --version
 ```
 
 ## 📚 Usage
@@ -101,48 +100,17 @@ ee_sie_limiter:output_FL->ee_soe_multiband_gate~2:probe_FL
 - `node_name~1` = second instance
 - `node_name~2` = third instance, etc.
 
-### qpwgraph Integration Attempts
+### qpwgraph Compatibility
+
+**Important Note:** PW_Indexed is **not fully compatible** with qpwgraph naming - it is **inspired by** qpwgraph's conventions but serves a different purpose:
+
+- **qpwgraph**: Focuses on display/labeling for visual interface
+- **PW_Indexed**: Uses augmented node names for unique operations and serializable connections
+
+**Integration Features:**
 - **Pause/Resume:** Experimental use of SIGSTOP/SIGCONT (may cause issues)
-- **Enumeration:** Tries to match qpwgraph's visual layout (fragile, may break)
-- **Session Conversion:** Planned feature for `node~1` ↔ `node-1` conversion
-
-## 🧪 Development Status
-
-### ✅ Phase 1 - Core Infrastructure (COMPLETE)
-- [x] Enhanced PipeWire data engine with caching
-- [x] Indexed node enumeration matching qpwgraph
-- [x] Service management (qpwgraph pause/resume)
-- [x] Pattern matching system
-- [x] Multiple output formats
-- [x] Basic node/port listing
-
-### ✅ Phase 2 - Connection Operations (COMPLETE)
-- [x] Connection listing (`connect` command)
-- [x] Connection creation (`make` command)
-- [x] Connection removal (`remove` command)
-- [x] Exclusive connections (`exclusive` command)
-- [x] Dry-run mode implementation
-- [x] Batch processing
-
-### ✅ Phase 3 - Patchbay Synchronization (COMPLETE)
-- [x] qpwgraph XML export functionality
-- [x] qpwgraph XML import with modes (add/replace/merge)
-- [x] Patchbay synchronization (`sync` command)
-- [x] Command-specific option parsing
-- [x] Comprehensive error handling
-
-### 🚧 Phase 4 - Documentation & Examples (IN PROGRESS)
-- [x] Comprehensive README update
-- [ ] ARCHITECTURE.md deep-dive
-- [ ] TROUBLESHOOTING.md guide
-- [ ] Example patchbay files
-- [ ] Integration documentation
-
-### ✅ Phase 5 - Integration & Polish (COMPLETE)
-- [x] Integration with hq_audio.sh (production deployment)
-- [x] Advanced error recovery (service management)
-- [x] Performance optimizations (caching system)
-- [x] Extended test suite (comprehensive validation)
+- **Enumeration:** Attempts to match qpwgraph's visual layout (not guaranteed)
+- **Serializable Format:** Enables reproducible connection specifications across system restarts
 
 ## 🛠️ Contributing
 
@@ -169,11 +137,10 @@ cd ~/projs/pw_indexed
 ## 📁 Project Structure
 
 ```
-pw_indexed/
-├── pw_indexed.sh           # Main executable
+pw-indexed/
+├── pw-indexed              # Main executable
 ├── README.md               # This file
 ├── ARCHITECTURE.md         # Technical architecture
-├── WARP.md                 # Warp terminal integration guide
 ├── tests/                  # Test suite
 │   ├── test_basic.sh      # Basic functionality tests
 │   ├── test_enumeration.sh # Enumeration accuracy tests
@@ -181,18 +148,18 @@ pw_indexed/
 ├── docs/                   # Documentation
 │   ├── API.md             # Command reference
 │   └── TROUBLESHOOTING.md # Common issues
-├── examples/               # Example usage
-│   └── patchbay_files/    # Sample patchbay configurations
-└── .git/                   # Version control
+└── examples/               # Example usage
+    └── patchbay_files/    # Sample patchbay configurations
 ```
 
-## 🎯 Goals (Aspirational)
+## 🚀 Future Goals
 
-1. **Enumeration consistency** - Try to match qpwgraph's indexing when possible
-2. **Basic service control** - Pause/resume functionality (experimental)
-3. **Session compatibility** - Eventually support qpwgraph session files
-4. **Usable performance** - Reasonable response times for basic operations
-5. **Clear documentation** - Explain what it does and doesn't do
+1. **Enhanced Enumeration Consistency** - Improve matching with qpwgraph's indexing behavior
+2. **Robust Service Control** - More reliable pause/resume functionality for qpwgraph integration
+3. **Session File Support** - Full qpwgraph session file import/export capabilities
+4. **Performance Optimization** - Further improvements to response times and caching efficiency
+5. **Extended Serialization** - Additional machine-readable formats for automation ecosystems
+6. **Real-time Connection Monitoring** - Live connection change detection and logging
 
 ## 🔧 Technical Details
 
@@ -209,9 +176,9 @@ pw_indexed/
 - Automatic invalidation and refresh
 
 ### Integration Notes
-- May work with existing `hq_audio.sh` workflows (not guaranteed)
 - Thin wrapper around `pw-link` and `pw-dump` (all credit to PipeWire devs)
 - Attempts to add enumeration info to standard tools
+- Designed for integration with automated audio management workflows
 
 ## 📞 Support
 
