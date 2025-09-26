@@ -2,31 +2,35 @@
 
 ## Overview
 
-`pw_indexed` is an experimental wrapper around PipeWire tools, attempting to address two common issues:
+`pw_indexed` is an experimental wrapper around PipeWire tools with a **single-call architecture** for optimal performance. It addresses two common issues:
 
 1. **Node Instance Enumeration:** Multiple instances of the same PipeWire node need consistent, deterministic indexing
 2. **qpwgraph Interference:** qpwgraph actively fights programmatic connection changes when running
 
-## Core Architecture
+**Version 1.4.0 introduces single-call architecture**: Instead of multiple `pw-dump` calls and jq processing, all data is fetched once and processed in memory for dramatically improved performance.
 
-### 1. Enhanced PipeWire Data Engine
+## Core Architecture (Single-Call)
 
-**Location:** Lines 120-250 in `pw_indexed.sh`
+### 1. Single-Call Data Initialization
+
+**Location:** Lines 131-280 in `pw_indexed.sh`
 
 ```bash
 Components:
-├── get_pipewire_dump()           # Cached pw-dump wrapper
-├── create_node_mapping()         # Indexed enumeration engine  
-├── resolve_node_id()             # Tilde notation resolver
-└── get_port_id()                 # Port ID resolution
+├── initialize_pipewire_data()    # Single pw-dump call
+├── create_all_mappings()         # Comprehensive data processing
+├── get_node_data()               # Fast node lookups
+├── get_port_info()               # Fast port lookups
+└── resolve_node_id()             # Optimized tilde resolver
 ```
 
-**Approach:** Attempts to reverse-engineer qpwgraph's enumeration logic (ascending node ID sort). May break if qpwgraph changes.
+**Approach:** Single `pw-dump` execution with comprehensive jq processing to extract all needed data into memory structures.
 
-**Caching Strategy:**
-- Location: `/tmp/pw_indexed/pipewire_dump`
-- TTL: 5 seconds (configurable via `CACHE_TTL`)
-- Automatic invalidation and refresh
+**In-Memory Processing:**
+- Single pw-dump call per execution
+- All data structures pre-computed
+- Fast lookups using associative arrays
+- Temporary processing files in fast temp (`/dev/shm` preferred)
 
 ### 2. Node Enumeration System
 
@@ -126,13 +130,22 @@ CLI args → option parsing → command dispatch → create_node_mapping() → e
 detect qpwgraph → pause if running → perform operations → resume if was running
 ```
 
-## Key Data Structures
+## Key Data Structures (Single-Call Architecture)
 
-### Global Associative Arrays
+### Pre-Computed Global Associative Arrays
 ```bash
 declare -gA node_instances      # node_id -> "indexed_name"
 declare -gA instance_counters   # node_name -> count  
 declare -gA node_id_lists      # node_name -> "id1 id2 id3"
+declare -gA node_data          # node_id -> "serial:state:format:rate:media_class"
+declare -gA port_data          # port_id -> "node_id:port_name:direction"
+declare -gA connection_data    # link_id -> "output_node:output_port->input_node:input_port:state"
+```
+
+### Memory Management
+```bash
+PW_DUMP_DATA=""              # Raw pw-dump JSON in memory
+DATA_INITIALIZED=false       # Prevents redundant initialization
 ```
 
 ### Configuration Variables
@@ -159,22 +172,23 @@ WIREPLUMBER_SERVICE="wireplumber" # SystemD service name
 - **Our Approach:** Pause qpwgraph during operations, resume after
 - **Implementation:** SIGSTOP/SIGCONT (may cause instability)
 
-## Performance Characteristics
+## Performance Characteristics (Single-Call Architecture)
 
-### Caching Strategy
-- **Cache Hit:** ~10ms response time
-- **Cache Miss:** ~200ms response time (pw-dump + processing)
-- **Cache TTL:** 5 seconds (balances freshness vs performance)
+### Execution Performance
+- **Initialization:** ~150ms (single pw-dump + comprehensive processing)
+- **Subsequent Operations:** ~1-5ms (direct array lookups)
+- **Memory Processing:** All jq operations done once upfront
 
 ### Memory Usage
-- **Typical:** ~50KB for associative arrays with 40 nodes
-- **Peak:** ~200KB during full enumeration with 200+ nodes
-- **Cache File:** ~500KB typical pw-dump output
+- **Typical:** ~100KB for all associative arrays with 40 nodes
+- **Peak:** ~500KB during initialization with 200+ nodes
+- **Raw Data:** pw-dump JSON kept in memory (~500KB typical)
+- **Temp Files:** Minimal usage in fast temp (`/dev/shm`)
 
 ### Scalability
-- **Linear complexity:** O(n) where n = number of nodes
-- **Light testing:** Works with typical audio setups (~50 nodes)
-- **Bottleneck:** jq processing of pw-dump output (could be slow with many nodes)
+- **Linear complexity:** O(n) initialization, O(1) lookups
+- **Optimized for:** Repeated operations on same dataset
+- **Bottleneck:** Single comprehensive jq processing (one-time cost)
 
 ## Error Handling Strategy
 

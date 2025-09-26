@@ -6,7 +6,7 @@
 # Removed set -e to allow comprehensive testing even with failures
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PW_INDEXED="$SCRIPT_DIR/pw_indexed.sh"
+PW_INDEXED="$SCRIPT_DIR/pw-indexed"
 
 # Colors for output
 RED='\033[0;31m'

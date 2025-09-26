@@ -9,7 +9,7 @@
 set -e
 
 SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
-PW_INDEXED="$SCRIPT_DIR/../pw_indexed.sh"
+PW_INDEXED="$SCRIPT_DIR/../pw-indexed"
 
 echo "=== pw_indexed.sh Basic Usage Examples ==="
 echo "Script location: $PW_INDEXED"
