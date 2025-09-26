@@ -164,6 +164,7 @@ declare -gA node_id_lists      # node_name -> "id1 id2 id3"
 declare -gA node_data          # node_id -> "serial:state:format:rate:media_class"
 declare -gA port_data          # port_id -> "node_id:port_name:direction"
 declare -gA connection_data    # link_id -> "output_node:output_port->input_node:input_port:state"
+declare -gA node_ports         # node_id -> "port1_id port2_id port3_id" (space-separated list)
 
 # Create all data mappings with single JSON processing
 create_all_mappings() {
@@ -209,6 +210,13 @@ create_all_mappings() {
             "PORT")
                 IFS=':' read -r port_id node_id port_name direction <<< "$data_part"
                 port_data[$port_id]="$node_id:$port_name:$direction"
+                
+                # Build reverse lookup: node_id -> port_ids
+                if [[ -z "${node_ports[$node_id]:-}" ]]; then
+                    node_ports[$node_id]="$port_id"
+                else
+                    node_ports[$node_id]="${node_ports[$node_id]} $port_id"
+                fi
                 ;;
             "LINK")
                 IFS=':' read -r link_id output_node output_port input_node input_port state <<< "$data_part"
@@ -544,34 +552,31 @@ list_nodes() {
                             echo ","
                         fi
                         if [[ "$show_detailed" == true ]]; then
-                            # Get comprehensive information for this node
-                            local node_info
-                            node_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
-                                .[] | 
-                                select(.type == "PipeWire:Interface:Node") | 
-                                select(.id == ($node_id | tonumber)) |
-                                "\(.info.props."object.serial" // "N/A"):\(.info.state // "unknown"):\(.info.props."audio.format" // "N/A"):\(.info.props."audio.rate" // "N/A"):\(.info.props."media.class" // "N/A")"
-                            ' 2>/dev/null)
+                            # Get comprehensive information from pre-computed data
+                            local node_info="${node_data[$node_id]:-}"
+                            local serial_number="N/A" node_state="unknown" format="N/A" rate="N/A" media_class="N/A"
+                            if [[ -n "$node_info" ]]; then
+                                serial_number=$(echo "$node_info" | cut -d':' -f1)
+                                node_state=$(echo "$node_info" | cut -d':' -f2)
+                                format=$(echo "$node_info" | cut -d':' -f3)
+                                rate=$(echo "$node_info" | cut -d':' -f4)
+                                media_class=$(echo "$node_info" | cut -d':' -f5)
+                            fi
                             
-                            # Get port information with channel counting
-                            local port_info
-                            port_info=$(get_pipewire_dump | jq -r --arg node_id "$node_id" '
-                                [.[] | select(.type == "PipeWire:Interface:Port") | select(.info.props."node.id" == ($node_id | tonumber))] |
-                                group_by(.info.props."port.direction") |
-                                map({
-                                    direction: .[0].info.props."port.direction",
-                                    count: length
-                                }) |
-                                "in:\(map(select(.direction == "in") | .count)[0] // 0):out:\(map(select(.direction == "out") | .count)[0] // 0)"
-                            ' 2>/dev/null)
-                            
-                            local serial_number=$(echo "$node_info" | cut -d':' -f1)
-                            local node_state=$(echo "$node_info" | cut -d':' -f2)
-                            local format=$(echo "$node_info" | cut -d':' -f3)
-                            local rate=$(echo "$node_info" | cut -d':' -f4)
-                            local media_class=$(echo "$node_info" | cut -d':' -f5)
-                            local input_count=$(echo "$port_info" | cut -d':' -f2)
-                            local output_count=$(echo "$port_info" | cut -d':' -f4)
+                            # Count ports from pre-computed data
+                            local input_count=0 output_count=0
+                            for port_id in "${!port_data[@]}"; do
+                                local port_info="${port_data[$port_id]}"
+                                local port_node_id=$(echo "$port_info" | cut -d':' -f1)
+                                local direction=$(echo "$port_info" | cut -d':' -f3)
+                                if [[ "$port_node_id" == "$node_id" ]]; then
+                                    if [[ "$direction" == "in" ]]; then
+                                        ((input_count++))
+                                    elif [[ "$direction" == "out" ]]; then
+                                        ((output_count++))
+                                    fi
+                                fi
+                            done
                             
                             echo "  {\"name\": \"$indexed_name\", \"node_id\": $node_id, \"serial_number\": \"$serial_number\", \"state\": \"$node_state\", \"channels\": \"$input_count/$output_count\", \"format\": \"$format\", \"rate\": \"$rate\", \"media_class\": \"$media_class\"}"
                         else
@@ -773,41 +778,47 @@ list_ports() {
     local port_filter="${2:-}"
     
     log "Listing ports for node pattern: $node_pattern"
-    create_node_mapping
+    create_all_mappings  # Use optimized data structures
     
     case "$FORMAT" in
         "$FORMAT_ONELINE")
             if [[ ${#node_instances[@]} -gt 0 ]]; then
+                local output_lines=()
                 for node_id in "${!node_instances[@]}"; do
                     local indexed_name="${node_instances[$node_id]}"
                     if pattern_match "$indexed_name" "$node_pattern"; then
-                        get_pipewire_dump | jq -r --arg node_id "$node_id" '
-                            .[] |
-                            select(.type == "PipeWire:Interface:Port") |
-                            select(.info.props."node.id" == ($node_id | tonumber)) |
-                            .info.props."port.name"
-                        ' 2>/dev/null | while read -r port_name; do
-                            if [[ -n "$port_name" ]]; then
+                        # Use efficient port lookup for this node
+                        local node_port_ids="${node_ports[$node_id]:-}"
+                        if [[ -n "$node_port_ids" ]]; then
+                            for port_id in $node_port_ids; do
+                                local port_info="${port_data[$port_id]}"
+                                local port_name=$(echo "$port_info" | cut -d':' -f2)
+                                local direction=$(echo "$port_info" | cut -d':' -f3)
+                                
                                 # Apply port filter if specified
                                 case "$port_filter" in
                                     "--input")
-                                        if [[ "$port_name" == *"input"* || "$port_name" == *"playback"* ]]; then
-                                            echo "$indexed_name:$port_name"
+                                        if [[ "$direction" == "in" ]]; then
+                                            output_lines+=("$indexed_name:$port_name")
                                         fi
                                         ;;
                                     "--output")
-                                        if [[ "$port_name" == *"output"* || "$port_name" == *"capture"* || "$port_name" == *"monitor"* ]]; then
-                                            echo "$indexed_name:$port_name"
+                                        if [[ "$direction" == "out" ]]; then
+                                            output_lines+=("$indexed_name:$port_name")
                                         fi
                                         ;;
                                     *)
-                                        echo "$indexed_name:$port_name"
+                                        output_lines+=("$indexed_name:$port_name")
                                         ;;
                                 esac
-                            fi
-                        done
+                            done
+                        fi
                     fi
-                done | sort
+                done
+                # Sort and output
+                if [[ ${#output_lines[@]} -gt 0 ]]; then
+                    printf '%s\n' "${output_lines[@]}" | sort
+                fi
             fi
             ;;
         *)
@@ -817,16 +828,18 @@ list_ports() {
             printf "%-30s %-20s %s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 20 '' | tr ' ' '-')" "---------"
             
             if [[ ${#node_instances[@]} -gt 0 ]]; then
-                for node_id in $(printf '%s\n' "${!node_instances[@]}" | sort -n); do
+                local output_lines=()
+                for node_id in "${!node_instances[@]}"; do
                     local indexed_name="${node_instances[$node_id]}"
                     if pattern_match "$indexed_name" "$node_pattern"; then
-                        get_pipewire_dump | jq -r --arg node_id "$node_id" '
-                            .[] |
-                            select(.type == "PipeWire:Interface:Port") |
-                            select(.info.props."node.id" == ($node_id | tonumber)) |
-                            "\(.info.props."port.name"):\(.info.props."port.direction")"
-                        ' 2>/dev/null | while IFS=':' read -r port_name direction; do
-                            if [[ -n "$port_name" ]]; then
+                        # Use efficient port lookup for this node
+                        local node_port_ids="${node_ports[$node_id]:-}"
+                        if [[ -n "$node_port_ids" ]]; then
+                            for port_id in $node_port_ids; do
+                                local port_info="${port_data[$port_id]}"
+                                local port_name=$(echo "$port_info" | cut -d':' -f2)
+                                local direction=$(echo "$port_info" | cut -d':' -f3)
+                                
                                 # Apply port filter if specified
                                 local show_port=true
                                 case "$port_filter" in
@@ -843,12 +856,16 @@ list_ports() {
                                 esac
                                 
                                 if [[ "$show_port" == true ]]; then
-                                    printf "%-30s %-20s %s\n" "$indexed_name" "$port_name" "$direction"
+                                    output_lines+=("$(printf "%-30s %-20s %s\n" "$indexed_name" "$port_name" "$direction")")
                                 fi
-                            fi
-                        done
+                            done
+                        fi
                     fi
                 done
+                # Sort and output
+                if [[ ${#output_lines[@]} -gt 0 ]]; then
+                    printf '%s\n' "${output_lines[@]}" | sort
+                fi
             fi
             ;;
     esac
