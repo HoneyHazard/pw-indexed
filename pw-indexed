@@ -278,12 +278,35 @@ get_port_info() {
     echo "${port_data[$port_id]:-}"
 }
 
-# Get port name by port ID (optimized)
+# Efficient string parsing functions (no subprocess calls)
+parse_field() {
+    local data="$1"
+    local field_num="$2"
+    local delimiter="${3:-:}"
+    
+    # Use bash parameter expansion for field extraction
+    local temp="$data"
+    local count=1
+    
+    while [[ $count -lt $field_num && "$temp" == *"$delimiter"* ]]; do
+        temp="${temp#*$delimiter}"
+        ((count++))
+    done
+    
+    # Extract the field (remove everything after next delimiter)
+    if [[ "$temp" == *"$delimiter"* ]]; then
+        echo "${temp%%$delimiter*}"
+    else
+        echo "$temp"
+    fi
+}
+
+# Get port name by port ID (optimized - no subprocess)
 get_port_name_by_id() {
     local port_id="$1"
     local port_info="${port_data[$port_id]:-}"
     if [[ -n "$port_info" ]]; then
-        echo "$port_info" | cut -d':' -f2
+        parse_field "$port_info" 2 ":"
     fi
 }
 
@@ -792,8 +815,10 @@ list_ports() {
                         if [[ -n "$node_port_ids" ]]; then
                             for port_id in $node_port_ids; do
                                 local port_info="${port_data[$port_id]}"
-                                local port_name=$(echo "$port_info" | cut -d':' -f2)
-                                local direction=$(echo "$port_info" | cut -d':' -f3)
+                                # Parse: "node_id:port_name:direction"
+                                local temp="${port_info#*:}"      # Remove node_id:
+                                local port_name="${temp%:*}"      # Extract port_name
+                                local direction="${temp#*:}"      # Extract direction
                                 
                                 # Apply port filter if specified
                                 case "$port_filter" in
@@ -837,8 +862,10 @@ list_ports() {
                         if [[ -n "$node_port_ids" ]]; then
                             for port_id in $node_port_ids; do
                                 local port_info="${port_data[$port_id]}"
-                                local port_name=$(echo "$port_info" | cut -d':' -f2)
-                                local direction=$(echo "$port_info" | cut -d':' -f3)
+                                # Parse: "node_id:port_name:direction"
+                                local temp="${port_info#*:}"      # Remove node_id:
+                                local port_name="${temp%:*}"      # Extract port_name
+                                local direction="${temp#*:}"      # Extract direction
                                 
                                 # Apply port filter if specified
                                 local show_port=true
@@ -920,14 +947,14 @@ list_connections() {
                     
                     # Parse connection part: "output_node:output_port->input_node:input_port"
                     local output_part input_part
-                    output_part=$(echo "$connection_part" | cut -d'-' -f1)
-                    input_part=$(echo "$connection_part" | cut -d'>' -f2)
+                    output_part="${connection_part%->*}"
+                    input_part="${connection_part#*->}"
                     
                     local output_node_id output_port_id input_node_id input_port_id
-                    output_node_id=$(echo "$output_part" | cut -d':' -f1)
-                    output_port_id=$(echo "$output_part" | cut -d':' -f2)
-                    input_node_id=$(echo "$input_part" | cut -d':' -f1)
-                    input_port_id=$(echo "$input_part" | cut -d':' -f2)
+                    output_node_id="${output_part%:*}"
+                    output_port_id="${output_part#*:}"
+                    input_node_id="${input_part%:*}"
+                    input_port_id="${input_part#*:}"
                     
                     # Get indexed names and port names from pre-computed data
                     local output_indexed_name="${node_instances[$output_node_id]:-node_$output_node_id}"
@@ -940,10 +967,14 @@ list_connections() {
                     local input_port_name="port_$input_port_id"
                     
                     if [[ -n "$output_port_info" ]]; then
-                        output_port_name=$(echo "$output_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name
+                        local temp="${output_port_info#*:}"  # Remove node_id:
+                        output_port_name="${temp%:*}"        # Remove :direction
                     fi
                     if [[ -n "$input_port_info" ]]; then
-                        input_port_name=$(echo "$input_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name  
+                        local temp="${input_port_info#*:}"   # Remove node_id:
+                        input_port_name="${temp%:*}"         # Remove :direction
                     fi
                     
                     # Create canonical connection string
@@ -970,14 +1001,14 @@ list_connections() {
                     
                     # Parse connection part: "output_node:output_port->input_node:input_port"
                     local output_part input_part
-                    output_part=$(echo "$connection_part" | cut -d'-' -f1)
-                    input_part=$(echo "$connection_part" | cut -d'>' -f2)
+                    output_part="${connection_part%->*}"
+                    input_part="${connection_part#*->}"
                     
                     local output_node_id output_port_id input_node_id input_port_id
-                    output_node_id=$(echo "$output_part" | cut -d':' -f1)
-                    output_port_id=$(echo "$output_part" | cut -d':' -f2)
-                    input_node_id=$(echo "$input_part" | cut -d':' -f1)
-                    input_port_id=$(echo "$input_part" | cut -d':' -f2)
+                    output_node_id="${output_part%:*}"
+                    output_port_id="${output_part#*:}"
+                    input_node_id="${input_part%:*}"
+                    input_port_id="${input_part#*:}"
                     
                     # Get indexed names and port names from pre-computed data
                     local output_indexed_name="${node_instances[$output_node_id]:-node_$output_node_id}"
@@ -990,10 +1021,14 @@ list_connections() {
                     local input_port_name="port_$input_port_id"
                     
                     if [[ -n "$output_port_info" ]]; then
-                        output_port_name=$(echo "$output_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name
+                        local temp="${output_port_info#*:}"  # Remove node_id:
+                        output_port_name="${temp%:*}"        # Remove :direction
                     fi
                     if [[ -n "$input_port_info" ]]; then
-                        input_port_name=$(echo "$input_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name
+                        local temp="${input_port_info#*:}"   # Remove node_id:
+                        input_port_name="${temp%:*}"         # Remove :direction
                     fi
                     
                     # Create canonical connection string
@@ -1030,14 +1065,14 @@ list_connections() {
                     
                     # Parse connection part: "output_node:output_port->input_node:input_port"
                     local output_part input_part
-                    output_part=$(echo "$connection_part" | cut -d'-' -f1)
-                    input_part=$(echo "$connection_part" | cut -d'>' -f2)
+                    output_part="${connection_part%->*}"
+                    input_part="${connection_part#*->}"
                     
                     local output_node_id output_port_id input_node_id input_port_id
-                    output_node_id=$(echo "$output_part" | cut -d':' -f1)
-                    output_port_id=$(echo "$output_part" | cut -d':' -f2)
-                    input_node_id=$(echo "$input_part" | cut -d':' -f1)
-                    input_port_id=$(echo "$input_part" | cut -d':' -f2)
+                    output_node_id="${output_part%:*}"
+                    output_port_id="${output_part#*:}"
+                    input_node_id="${input_part%:*}"
+                    input_port_id="${input_part#*:}"
                     
                     # Get indexed names and port names from pre-computed data
                     local output_indexed_name="${node_instances[$output_node_id]:-node_$output_node_id}"
@@ -1050,10 +1085,14 @@ list_connections() {
                     local input_port_name="port_$input_port_id"
                     
                     if [[ -n "$output_port_info" ]]; then
-                        output_port_name=$(echo "$output_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name
+                        local temp="${output_port_info#*:}"  # Remove node_id:
+                        output_port_name="${temp%:*}"        # Remove :direction
                     fi
                     if [[ -n "$input_port_info" ]]; then
-                        input_port_name=$(echo "$input_port_info" | cut -d':' -f2)
+                        # Extract port name: "node_id:port_name:direction" -> port_name
+                        local temp="${input_port_info#*:}"   # Remove node_id:
+                        input_port_name="${temp%:*}"         # Remove :direction
                     fi
                     
                     # Create source and target strings
