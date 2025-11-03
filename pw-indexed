@@ -9,7 +9,7 @@
 # Key Features:
 # - Indexed node enumeration matching qpwgraph (node~0, node~1, node~2)
 # - Creation-order based enumeration using object.serial (matches qpwgraph exactly)
-# - qpwgraph service management (pause/resume for reliable operations)
+# - Smart qpwgraph management (only intervenes when patchbay is active)
 # - Pattern-based connection operations
 # - Canonical one-liner format for copy-paste
 # - Live patchbay synchronization
@@ -31,7 +31,7 @@ set -eo pipefail
 #########################################
 
 SCRIPT_NAME="pw_indexed.sh"
-VERSION="1.4.0"  # Single-call architecture
+VERSION="1.5.0"  # Smart qpwgraph management
 CACHE_DIR="/dev/shm/pw_indexed"  # Use fast temp (tmpfs) if available, fallback to /tmp
 CACHE_TTL=5  # Cache valid for 5 seconds
 
@@ -84,9 +84,9 @@ COMMANDS:
     masked|mask "pattern->pattern"  Remove connections with pattern masking
     exclusive|e "source->target"    Make exclusive connection
     
-    pause qpwgraph                  Pause qpwgraph for operations
-    resume qpwgraph                 Resume qpwgraph
-    service status                  Show service status
+    pause qpwgraph                  Pause qpwgraph process (SIGSTOP)
+    resume qpwgraph                 Resume qpwgraph process (SIGCONT)
+    service status                  Show service status and patchbay state
     
     sync                           Sync connections to qpwgraph patchbay
     export file.qpwgraph           Export to qpwgraph format
@@ -165,9 +165,15 @@ declare -gA node_data          # node_id -> "serial:state:format:rate:media_clas
 declare -gA port_data          # port_id -> "node_id:port_name:direction"
 declare -gA connection_data    # link_id -> "output_node:output_port->input_node:input_port:state"
 declare -gA node_ports         # node_id -> "port1_id port2_id port3_id" (space-separated list)
+MAPPINGS_INITIALIZED=false     # Track if mappings have been created
 
 # Create all data mappings with single JSON processing
 create_all_mappings() {
+    # Only create mappings once per script execution
+    if [[ "$MAPPINGS_INITIALIZED" == true ]]; then
+        return 0
+    fi
+    
     if [[ "$DATA_INITIALIZED" != true ]]; then
         initialize_pipewire_data
     fi
@@ -259,6 +265,7 @@ create_all_mappings() {
     done
     
     rm -f "$temp_file"
+    MAPPINGS_INITIALIZED=true
     log "Data mappings complete. Nodes: ${#node_instances[@]}, Ports: ${#port_data[@]}, Links: ${#connection_data[@]}"
 }
 
@@ -369,12 +376,31 @@ is_qpwgraph_running() {
     pgrep -x "$QPWGRAPH_PROCESS" >/dev/null 2>&1
 }
 
+# Check if a connection would conflict with qpwgraph's patchbay
+# Returns 0 if intervention needed, 1 if safe to proceed
+needs_qpwgraph_intervention() {
+    # Only intervene if qpwgraph is running AND started with --activated
+    if ! is_qpwgraph_running; then
+        return 1  # No intervention needed if not running
+    fi
+    
+    local qpw_cmdline=$(ps -o args= -p $(pgrep -x "$QPWGRAPH_PROCESS") 2>/dev/null)
+    if [[ "$qpw_cmdline" == *"--activated"* ]]; then
+        log "qpwgraph patchbay is active - intervention may be needed"
+        return 0  # Intervention might be needed
+    else
+        log "qpwgraph patchbay is not activated - no intervention needed"
+        return 1  # Safe to proceed
+    fi
+}
+
 pause_qpwgraph() {
     if is_qpwgraph_running; then
-        log "Pausing qpwgraph for reliable connection operations..."
-        # Send SIGSTOP to pause the process without killing it
+        log "Pausing qpwgraph process (SIGSTOP)..."
+        # Use SIGSTOP to pause the entire process
+        # This is safer than SIGUSR1 which may have unpredictable behavior
         pkill -STOP -x "$QPWGRAPH_PROCESS" 2>/dev/null || true
-        sleep 0.5  # Give it a moment to pause
+        sleep 0.3  # Give it time to stop
         echo "qpwgraph paused"
     else
         echo "qpwgraph not running"
@@ -383,10 +409,13 @@ pause_qpwgraph() {
 
 resume_qpwgraph() {
     if pgrep -x "$QPWGRAPH_PROCESS" >/dev/null 2>&1; then
-        log "Resuming qpwgraph..."
-        # Send SIGCONT to resume the paused process
+        # Brief delay before resume to let PipeWire state stabilize
+        # This prevents qpwgraph from immediately recreating removed connections
+        sleep 0.5
+        log "Resuming qpwgraph process (SIGCONT)..."
+        # Use SIGCONT to resume the paused process
         pkill -CONT -x "$QPWGRAPH_PROCESS" 2>/dev/null || true
-        sleep 0.5  # Give it a moment to resume
+        sleep 0.3  # Give it time to resume
         echo "qpwgraph resumed"
     else
         echo "qpwgraph not running"
@@ -397,12 +426,16 @@ service_status() {
     echo "=== Service Status ==="
     
     if is_qpwgraph_running; then
-        # Check if it's paused (stopped)
+        # Check process state and patchbay activation
         local qpw_state=$(ps -o state= -p $(pgrep -x "$QPWGRAPH_PROCESS") 2>/dev/null | tr -d ' ')
+        local qpw_cmdline=$(ps -o args= -p $(pgrep -x "$QPWGRAPH_PROCESS") 2>/dev/null)
+        
         if [[ "$qpw_state" == "T" ]]; then
-            echo "qpwgraph: PAUSED (can resume)"
+            echo "qpwgraph: PAUSED (use 'pw-indexed resume qpwgraph' to unpause)"
+        elif [[ "$qpw_cmdline" == *"--activated"* ]]; then
+            echo "qpwgraph: RUNNING (patchbay ACTIVE - may interfere with connections)"
         else
-            echo "qpwgraph: RUNNING"
+            echo "qpwgraph: RUNNING (patchbay INACTIVE - won't interfere)"
         fi
     else
         echo "qpwgraph: NOT RUNNING"
@@ -912,6 +945,10 @@ list_connections() {
     # Parse command-specific options
     while [[ $# -gt 0 ]]; do
         case $1 in
+            list)
+                # 'list' is a command synonym, not a pattern - ignore it
+                shift
+                ;;
             --oneline)
                 FORMAT="$FORMAT_ONELINE"
                 shift
@@ -1307,7 +1344,7 @@ make_connection() {
     log "Resolved: $source_node:$source_port -> port ID $source_port_id"
     log "Resolved: $target_node:$target_port -> port ID $target_port_id"
     
-    # Check if connection already exists
+    # Check if connection already exists - return early if so (no need to pause qpwgraph)
     local existing_connection
     existing_connection=$(get_pipewire_dump | jq -r --arg out_port "$source_port_id" --arg in_port "$target_port_id" '
         .[] |
@@ -1318,6 +1355,7 @@ make_connection() {
     ' 2>/dev/null | head -1)
     
     if [[ -n "$existing_connection" ]]; then
+        log "Connection already exists - no action needed"
         echo "Connection already exists (Link ID: $existing_connection)"
         return 0
     fi
@@ -1330,12 +1368,40 @@ make_connection() {
         return 0
     fi
     
+    log "Connection doesn't exist - will create it"
+    
+    # Only pause qpwgraph if it might interfere (unless globally disabled)
+    # We only get here if the connection doesn't exist, so we need to make a change
+    local qpw_was_paused=false
+    if [[ "$QPWGRAPH_MANAGEMENT_DISABLED" != true ]] && [[ "$QPWGRAPH_PAUSED_BY_US" != true ]]; then
+        if needs_qpwgraph_intervention; then
+            log "Pausing qpwgraph to prevent patchbay interference"
+            pause_qpwgraph >/dev/null 2>&1
+            QPWGRAPH_PAUSED_BY_US=true
+            qpw_was_paused=true
+        else
+            log "qpwgraph intervention not needed - proceeding directly"
+        fi
+    fi
+    
     log "Creating connection: port $source_port_id -> port $target_port_id"
     
     # Use pw-link to create the connection
+    local result=0
     if pw-link "$source_port_id" "$target_port_id" >/dev/null 2>&1; then
         echo "Successfully created connection: $source_node:$source_port -> $target_node:$target_port"
     else
+        result=1
+    fi
+    
+    # Resume qpwgraph if we paused it (and not in batch mode)
+    if [[ "$qpw_was_paused" == true ]] && [[ "${IN_BATCH_MODE:-false}" != true ]]; then
+        log "Resuming qpwgraph"
+        resume_qpwgraph >/dev/null 2>&1
+        QPWGRAPH_PAUSED_BY_US=false
+    fi
+    
+    if [[ $result -ne 0 ]]; then
         error "Failed to create connection: $source_node:$source_port -> $target_node:$target_port"
     fi
 }
@@ -1430,6 +1496,7 @@ remove_connection() {
         ' 2>/dev/null | head -1)
         
         if [[ -z "$link_id" ]]; then
+            log "Connection not found - already complies with request"
             echo "Connection not found: $connection_spec"
             return 1
         fi
@@ -1440,6 +1507,22 @@ remove_connection() {
             return 0
         fi
         
+        log "Connection exists - will remove it"
+        
+        # Only pause qpwgraph if it might interfere (unless globally disabled)
+        # We only get here if the connection exists, so we need to make a change
+        local qpw_was_paused=false
+        if [[ "$QPWGRAPH_MANAGEMENT_DISABLED" != true ]] && [[ "$QPWGRAPH_PAUSED_BY_US" != true ]]; then
+            if needs_qpwgraph_intervention; then
+                log "Pausing qpwgraph to prevent patchbay interference"
+                pause_qpwgraph >/dev/null 2>&1
+                QPWGRAPH_PAUSED_BY_US=true
+                qpw_was_paused=true
+            else
+                log "qpwgraph intervention not needed - proceeding directly"
+            fi
+        fi
+        
         log "Removing connection: Link ID $link_id"
         
         if pw-link -d "$link_id" >/dev/null 2>&1; then
@@ -1448,6 +1531,13 @@ remove_connection() {
         else
             echo "Failed to remove connection: $source_node:$source_port -> $target_node:$target_port"
             failed_count=1
+        fi
+        
+        # Resume qpwgraph if we paused it (and not in batch mode)
+        if [[ "$qpw_was_paused" == true ]] && [[ "${IN_BATCH_MODE:-false}" != true ]]; then
+            log "Resuming qpwgraph"
+            resume_qpwgraph >/dev/null 2>&1
+            QPWGRAPH_PAUSED_BY_US=false
         fi
     else
         # Pattern-based removal
@@ -1747,6 +1837,16 @@ exclusive_connection() {
     local removed_count=0
     local temp_file="/tmp/pw_indexed_exclusive_$$"
     
+    # Pause qpwgraph to prevent interference (unless globally disabled)
+    local qpw_was_paused=false
+    if [[ "$QPWGRAPH_MANAGEMENT_DISABLED" != true ]] && [[ "$QPWGRAPH_PAUSED_BY_US" != true ]] && is_qpwgraph_running; then
+        log "Pausing qpwgraph for exclusive connection operation"
+        pause_qpwgraph >/dev/null 2>&1
+        QPWGRAPH_PAUSED_BY_US=true
+        qpw_was_paused=true
+        sleep 0.2  # Brief delay to ensure qpwgraph is paused
+    fi
+    
     echo "Removing conflicting connections..."
     
     # Find all connections TO the same target port (exclusivity applies to input port only)
@@ -1846,9 +1946,21 @@ exclusive_connection() {
     log "Creating exclusive connection: port $source_port_id -> port $target_port_id"
     
     # Use pw-link to create the connection
+    local result=0
     if pw-link "$source_port_id" "$target_port_id" >/dev/null 2>&1; then
         echo "Successfully created exclusive connection: $source_node:$source_port -> $target_node:$target_port"
     else
+        result=1
+    fi
+    
+    # Resume qpwgraph if we paused it (and not in batch mode)
+    if [[ "$qpw_was_paused" == true ]] && [[ "${IN_BATCH_MODE:-false}" != true ]]; then
+        log "Resuming qpwgraph"
+        resume_qpwgraph >/dev/null 2>&1
+        QPWGRAPH_PAUSED_BY_US=false
+    fi
+    
+    if [[ $result -ne 0 ]]; then
         error "Failed to create exclusive connection: $source_node:$source_port -> $target_node:$target_port"
     fi
 }
@@ -2393,6 +2505,11 @@ process_batch_file() {
 #########################################
 
 main() {
+    # Check for global qpwgraph management disable flag
+    if [[ "${PW_INDEXED_NO_QPWGRAPH_MGMT:-}" == "true" ]]; then
+        QPWGRAPH_MANAGEMENT_DISABLED=true
+    fi
+    
     # Parse global options first
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -2416,8 +2533,16 @@ main() {
                 if [[ -z "${2:-}" ]]; then
                     error "--batch option requires a file path"
                 fi
+                # Set batch mode flag to prevent premature resume
+                IN_BATCH_MODE=true
                 process_batch_file "$2"
-                exit $?
+                local batch_result=$?
+                # Resume qpwgraph if we paused it during batch
+                if [[ "$QPWGRAPH_PAUSED_BY_US" == true ]]; then
+                    resume_qpwgraph >/dev/null 2>&1
+                    QPWGRAPH_PAUSED_BY_US=false
+                fi
+                exit $batch_result
                 ;;
             --help|-h)
                 usage
@@ -2506,5 +2631,13 @@ main() {
 
 # Only run main if script is executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Set up cleanup trap to ensure qpwgraph is resumed on exit
+    cleanup_qpwgraph() {
+        if [[ "$QPWGRAPH_PAUSED_BY_US" == true ]]; then
+            resume_qpwgraph >/dev/null 2>&1
+        fi
+    }
+    trap cleanup_qpwgraph EXIT
+    
     main "$@"
 fi
