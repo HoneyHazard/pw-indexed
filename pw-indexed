@@ -2505,9 +2505,11 @@ process_batch_file() {
 #########################################
 
 main() {
-    # Check for global qpwgraph management disable flag
-    if [[ "${PW_INDEXED_NO_QPWGRAPH_MGMT:-}" == "true" ]]; then
-        QPWGRAPH_MANAGEMENT_DISABLED=true
+    # qpwgraph management is off by default; set PW_INDEXED_QPWGRAPH_MGMT=true to enable.
+    # Legacy PW_INDEXED_NO_QPWGRAPH_MGMT is ignored (disabled is now the default).
+    QPWGRAPH_MANAGEMENT_DISABLED=true
+    if [[ "${PW_INDEXED_QPWGRAPH_MGMT:-}" == "true" ]]; then
+        QPWGRAPH_MANAGEMENT_DISABLED=false
     fi
     
     # Parse global options first
