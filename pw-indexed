@@ -31,7 +31,7 @@ set -eo pipefail
 #########################################
 
 SCRIPT_NAME="pw_indexed.sh"
-VERSION="1.5.0"  # Smart qpwgraph management
+VERSION="1.5.1"  # Pure-bash node-instance sort (no per-name subprocess forks)
 CACHE_DIR="/dev/shm/pw_indexed"  # Use fast temp (tmpfs) if available, fallback to /tmp
 CACHE_TTL=5  # Cache valid for 5 seconds
 
@@ -233,15 +233,36 @@ create_all_mappings() {
     
     # Create indexed node mapping
     for node_name in "${!temp_node_lists[@]}"; do
-        # Sort by serial number and extract node IDs
+        # Sort "serial:node_id" pairs by serial number and extract node IDs.
+        # Pure-bash insertion sort (no echo|tr|sort subprocess fork per node
+        # name) - group sizes are tiny (almost always 1, rarely more than a
+        # handful of instances of the same app), so O(n^2) here is free, and
+        # avoiding ~3 forks x every unique node name removes the dominant
+        # cost of this function on systems under scheduling contention.
+        local -a pairs=(${temp_node_lists[$node_name]})
+        local pair_count=${#pairs[@]}
+        local i j key key_serial cur_serial
+        for ((i = 1; i < pair_count; i++)); do
+            key="${pairs[i]}"
+            key_serial="${key%%:*}"
+            j=$((i - 1))
+            while ((j >= 0)); do
+                cur_serial="${pairs[j]%%:*}"
+                if ((cur_serial > key_serial)); then
+                    pairs[j + 1]="${pairs[j]}"
+                    ((j--))
+                else
+                    break
+                fi
+            done
+            pairs[j + 1]="$key"
+        done
+
         local sorted_nodes=()
-        while IFS= read -r serial_node; do
-            if [[ -n "$serial_node" ]]; then
-                local node_id=${serial_node#*:}
-                sorted_nodes+=("$node_id")
-            fi
-        done < <(echo "${temp_node_lists[$node_name]}" | tr ' ' '\n' | sort -t: -k1,1n)
-        
+        for serial_node in "${pairs[@]}"; do
+            sorted_nodes+=("${serial_node#*:}")
+        done
+
         local count=${#sorted_nodes[@]}
         instance_counters[$node_name]=$count
         node_id_lists[$node_name]="${sorted_nodes[*]}"
